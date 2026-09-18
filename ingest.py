@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
 
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
@@ -158,7 +157,7 @@ if show_dashboard:
 
 
     # ----------------------------------------------
-    # PRIORITY KPI CARDS
+    # KPI CARDS
     # ----------------------------------------------
 
     st.subheader("Priority Summary")
@@ -191,7 +190,7 @@ if show_dashboard:
 
 
     # ----------------------------------------------
-    # COLOURED PRIORITY DISTRIBUTION CHART
+    # PRIORITY DISTRIBUTION CHART
     # ----------------------------------------------
 
     st.subheader("Priority Distribution")
@@ -201,73 +200,10 @@ if show_dashboard:
         "Number of Tickets": priority_counts.values
     })
 
-
-    chart = (
-        alt.Chart(priority_chart)
-        .mark_bar(
-            cornerRadiusTopLeft=5,
-            cornerRadiusTopRight=5
-        )
-        .encode(
-
-            x=alt.X(
-                "Priority:N",
-                sort=[
-                    "Critical",
-                    "High",
-                    "Medium",
-                    "Low"
-                ],
-                title="Priority"
-            ),
-
-            y=alt.Y(
-                "Number of Tickets:Q",
-                title="Number of Tickets"
-            ),
-
-            color=alt.Color(
-                "Priority:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Critical",
-                        "High",
-                        "Medium",
-                        "Low"
-                    ],
-                    range=[
-                        "#E63946",   # Red
-                        "#F77F00",   # Orange
-                        "#F4C430",   # Yellow
-                        "#2ECC71"    # Green
-                    ]
-                ),
-                legend=alt.Legend(
-                    title="Priority"
-                )
-            ),
-
-            tooltip=[
-                alt.Tooltip(
-                    "Priority:N",
-                    title="Priority"
-                ),
-                alt.Tooltip(
-                    "Number of Tickets:Q",
-                    title="Tickets",
-                    format=","
-                )
-            ]
-        )
-        .properties(
-            height=400
-        )
-    )
-
-
-    st.altair_chart(
-        chart,
-        width="stretch"
+    st.bar_chart(
+        priority_chart,
+        x="Priority",
+        y="Number of Tickets"
     )
 
 
@@ -288,7 +224,6 @@ if show_dashboard:
         .round(2)
     )
 
-
     st.dataframe(
         priority_statistics,
         width="stretch",
@@ -297,7 +232,7 @@ if show_dashboard:
 
 
     # ----------------------------------------------
-    # HIGH PRIORITY WORKLOAD
+    # HIGH-PRIORITY WORKLOAD
     # ----------------------------------------------
 
     urgent_tickets = (
@@ -311,22 +246,13 @@ if show_dashboard:
         * 100
     )
 
-
     st.subheader("⚠️ High-Priority Workload")
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric(
-            "Critical + High Tickets",
-            f"{urgent_tickets:,}"
-        )
-
-    with col2:
-        st.metric(
-            "Percentage of All Tickets",
-            f"{urgent_percentage:.2f}%"
-        )
+    st.metric(
+        "Critical + High Tickets",
+        f"{urgent_tickets:,}",
+        f"{urgent_percentage:.2f}% of all tickets"
+    )
 
 
 # ==================================================
@@ -424,7 +350,7 @@ def pandas_answer(question):
 
 
     # ----------------------------------------------
-    # TOTAL NUMBER OF TICKETS
+    # TOTAL TICKETS
     # ----------------------------------------------
 
     if (
@@ -433,7 +359,7 @@ def pandas_answer(question):
     ):
 
         return (
-            f"The complete dataset contains "
+            f"The dataset contains "
             f"**{len(df):,} tickets**."
         )
 
@@ -456,7 +382,7 @@ def pandas_answer(question):
 def rag_answer(question):
 
     # ----------------------------------------------
-    # Retrieve similar tickets from ChromaDB
+    # Retrieve similar tickets
     # ----------------------------------------------
 
     results = vectorstore.similarity_search(
@@ -484,7 +410,7 @@ def rag_answer(question):
 
 
     # ----------------------------------------------
-    # RAG PROMPT
+    # RAG prompt
     # ----------------------------------------------
 
     prompt = f"""
@@ -526,7 +452,7 @@ ANSWER:
 
 
     # ----------------------------------------------
-    # Generate LLM answer
+    # Send context to LLM
     # ----------------------------------------------
 
     response = llm.invoke(prompt)
@@ -544,7 +470,7 @@ st.subheader("🤖 Ask the ITSM Assistant")
 
 st.write(
     "The Query Router automatically decides whether "
-    "to use Pandas data analysis or RAG semantic search."
+    "to use Pandas analysis or RAG semantic retrieval."
 )
 
 

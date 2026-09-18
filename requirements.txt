@@ -1,2 +1,8 @@
 streamlit
-pands
+pandas
+langchain
+langchain-openai
+langchain-chroma
+chromadb
+python-dotenv
+matplotlib
