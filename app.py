@@ -1,17 +1,29 @@
+import os
 import streamlit as st
 import pandas as pd
 import altair as alt
 
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
 
 # ==================================================
-# 1. LOAD ENVIRONMENT VARIABLES
+# 1. CONFIGURATION
 # ==================================================
 
 load_dotenv()
+
+CSV_PATH = "data/ITSM_Dataset.csv"
+CHROMA_PATH = "./chroma_db"
+COLLECTION_NAME = "itsm_tickets"
+
+# Number of tickets used for deployed RAG demonstration
+RAG_INDEX_SIZE = 1000
+
+# Number of documents inserted into Chroma per batch
+BATCH_SIZE = 100
 
 
 # ==================================================
@@ -27,29 +39,32 @@ st.set_page_config(
 st.title("🎫 ITSM Intelligent Assistant")
 
 st.write(
-    "Analyse ITSM ticket statistics and ask questions "
-    "using traditional data analysis or RAG."
+    "Explore ITSM statistics and ask questions using "
+    "traditional data analysis or Retrieval-Augmented "
+    "Generation (RAG)."
 )
 
 
 # ==================================================
-# 3. LOAD DATASET
+# 3. LOAD COMPLETE DATASET
 # ==================================================
 
 @st.cache_data
 def load_data():
-    return pd.read_csv("data/ITSM_Dataset.csv")
+
+    return pd.read_csv(CSV_PATH)
 
 
 df = load_data()
 
 
 # ==================================================
-# 4. LOAD EMBEDDING MODEL
+# 4. OPENAI EMBEDDING MODEL
 # ==================================================
 
 @st.cache_resource
 def load_embedding_model():
+
     return OpenAIEmbeddings(
         model="text-embedding-3-small"
     )
@@ -59,27 +74,163 @@ embedding_model = load_embedding_model()
 
 
 # ==================================================
-# 5. CONNECT TO CHROMADB
+# 5. CREATE LANGCHAIN DOCUMENTS
+# ==================================================
+
+def create_documents(dataframe):
+
+    documents = []
+
+    for _, row in dataframe.iterrows():
+
+        text = f"""
+Ticket ID: {row['Ticket ID']}
+Status: {row['Status']}
+Priority: {row['Priority']}
+Source: {row['Source']}
+Topic: {row['Topic']}
+Agent Group: {row['Agent Group']}
+Agent Name: {row['Agent Name']}
+"""
+
+        document = Document(
+            page_content=text,
+            metadata={
+                "ticket_id": str(row["Ticket ID"]),
+                "priority": str(row["Priority"]),
+                "status": str(row["Status"]),
+                "topic": str(row["Topic"])
+            }
+        )
+
+        documents.append(document)
+
+    return documents
+
+
+# ==================================================
+# 6. LOAD OR CREATE CHROMADB
 # ==================================================
 
 @st.cache_resource
-def load_vectorstore():
-    return Chroma(
-        persist_directory="./chroma_db",
+def load_or_create_vectorstore():
+
+    # ------------------------------------------------
+    # Create connection to ChromaDB
+    # ------------------------------------------------
+
+    vectorstore = Chroma(
+        collection_name=COLLECTION_NAME,
         embedding_function=embedding_model,
-        collection_name="itsm_tickets"
+        persist_directory=CHROMA_PATH
+    )
+
+    # ------------------------------------------------
+    # Check how many documents already exist
+    # ------------------------------------------------
+
+    existing_count = vectorstore._collection.count()
+
+    # ------------------------------------------------
+    # If database already contains documents,
+    # simply use it
+    # ------------------------------------------------
+
+    if existing_count > 0:
+
+        return vectorstore, existing_count
+
+
+    # ------------------------------------------------
+    # Otherwise create demonstration RAG index
+    # ------------------------------------------------
+
+    rag_df = df.head(RAG_INDEX_SIZE)
+
+    documents = create_documents(rag_df)
+
+    progress_text = st.empty()
+
+    progress_bar = st.progress(0)
+
+    progress_text.info(
+        "Creating RAG demonstration index. "
+        "This is required only when the vector "
+        "database is not available."
     )
 
 
-vectorstore = load_vectorstore()
+    total_documents = len(documents)
+
+
+    for start in range(
+        0,
+        total_documents,
+        BATCH_SIZE
+    ):
+
+        end = min(
+            start + BATCH_SIZE,
+            total_documents
+        )
+
+        batch = documents[start:end]
+
+        vectorstore.add_documents(batch)
+
+        progress = end / total_documents
+
+        progress_bar.progress(progress)
+
+        progress_text.info(
+            f"Creating RAG index: "
+            f"{end:,} / {total_documents:,} tickets"
+        )
+
+
+    progress_bar.empty()
+
+    progress_text.empty()
+
+
+    return vectorstore, total_documents
 
 
 # ==================================================
-# 6. LOAD LLM
+# 7. INITIALISE VECTOR DATABASE
+# ==================================================
+
+try:
+
+    vectorstore, rag_ticket_count = (
+        load_or_create_vectorstore()
+    )
+
+    rag_available = True
+
+except Exception as error:
+
+    rag_available = False
+
+    rag_ticket_count = 0
+
+    st.warning(
+        "The RAG vector database could not be "
+        "initialised. Data analytics remains available."
+    )
+
+    st.caption(
+        f"RAG error: {error}"
+    )
+
+
+# ==================================================
+# 8. LOAD LLM
 # ==================================================
 
 @st.cache_resource
 def load_llm():
+
     return ChatOpenAI(
         model="gpt-4.1-mini",
         temperature=0
@@ -90,28 +241,65 @@ llm = load_llm()
 
 
 # ==================================================
-# 7. DATASET INFORMATION
+# 9. SYSTEM COVERAGE
 # ==================================================
 
-st.subheader("📁 Dataset Information")
+st.subheader("📁 System Coverage")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
+
 
 with col1:
+
     st.metric(
-        "Total ITSM Tickets",
-        f"{len(df):,}"
+        "Dataset",
+        f"{len(df):,}",
+        help="Total number of tickets in the CSV dataset."
     )
 
+
 with col2:
+
     st.metric(
-        "Number of Columns",
-        len(df.columns)
+        "Analytics Coverage",
+        f"{len(df):,}",
+        help=(
+            "Pandas performs statistical analysis "
+            "against the complete CSV dataset."
+        )
     )
+
+
+with col3:
+
+    if rag_available:
+
+        st.metric(
+            "RAG Index",
+            f"{rag_ticket_count:,}",
+            help=(
+                "Number of tickets currently indexed "
+                "in ChromaDB for semantic retrieval."
+            )
+        )
+
+    else:
+
+        st.metric(
+            "RAG Index",
+            "Unavailable"
+        )
+
+
+st.caption(
+    "📊 Pandas analytics uses the complete dataset. "
+    "🔎 RAG semantic search uses the tickets indexed "
+    "in ChromaDB."
+)
 
 
 # ==================================================
-# 8. PRIORITY ANALYTICS DASHBOARD
+# 10. PRIORITY ANALYTICS DASHBOARD
 # ==================================================
 
 st.divider()
@@ -119,9 +307,10 @@ st.divider()
 st.subheader("📊 ITSM Priority Analytics")
 
 st.write(
-    "Explore the distribution of ticket priority levels "
+    "Explore the distribution of priority levels "
     "across the complete ITSM dataset."
 )
+
 
 show_dashboard = st.toggle(
     "Show Priority Dashboard"
@@ -130,9 +319,9 @@ show_dashboard = st.toggle(
 
 if show_dashboard:
 
-    # ----------------------------------------------
-    # Calculate priority statistics
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Priority statistics
+    # ------------------------------------------------
 
     priority_counts = (
         df["Priority"]
@@ -148,7 +337,9 @@ if show_dashboard:
         )
     )
 
+
     total_tickets = len(df)
+
 
     priority_percentages = (
         priority_counts
@@ -157,44 +348,54 @@ if show_dashboard:
     )
 
 
-    # ----------------------------------------------
-    # PRIORITY KPI CARDS
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # KPI cards
+    # ------------------------------------------------
 
     st.subheader("Priority Summary")
 
+
     col1, col2, col3, col4 = st.columns(4)
 
+
     with col1:
+
         st.metric(
             "🔴 Critical",
             f"{priority_counts['Critical']:,}"
         )
 
+
     with col2:
+
         st.metric(
             "🟠 High",
             f"{priority_counts['High']:,}"
         )
 
+
     with col3:
+
         st.metric(
             "🟡 Medium",
             f"{priority_counts['Medium']:,}"
         )
 
+
     with col4:
+
         st.metric(
             "🟢 Low",
             f"{priority_counts['Low']:,}"
         )
 
 
-    # ----------------------------------------------
-    # COLOURED PRIORITY DISTRIBUTION CHART
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Coloured priority chart
+    # ------------------------------------------------
 
     st.subheader("Priority Distribution")
+
 
     priority_chart = pd.DataFrame({
         "Priority": priority_counts.index,
@@ -228,6 +429,7 @@ if show_dashboard:
 
             color=alt.Color(
                 "Priority:N",
+
                 scale=alt.Scale(
                     domain=[
                         "Critical",
@@ -235,13 +437,15 @@ if show_dashboard:
                         "Medium",
                         "Low"
                     ],
+
                     range=[
-                        "#E63946",   # Red
-                        "#F77F00",   # Orange
-                        "#F4C430",   # Yellow
-                        "#2ECC71"    # Green
+                        "#E63946",
+                        "#F77F00",
+                        "#F4C430",
+                        "#2ECC71"
                     ]
                 ),
+
                 legend=alt.Legend(
                     title="Priority"
                 )
@@ -252,6 +456,7 @@ if show_dashboard:
                     "Priority:N",
                     title="Priority"
                 ),
+
                 alt.Tooltip(
                     "Number of Tickets:Q",
                     title="Tickets",
@@ -271,17 +476,25 @@ if show_dashboard:
     )
 
 
-    # ----------------------------------------------
-    # PRIORITY STATISTICS TABLE
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Priority statistics table
+    # ------------------------------------------------
 
     st.subheader("Priority Statistics")
 
+
     priority_statistics = pd.DataFrame({
-        "Priority": priority_counts.index,
-        "Tickets": priority_counts.values,
-        "Percentage (%)": priority_percentages.values
+
+        "Priority":
+            priority_counts.index,
+
+        "Tickets":
+            priority_counts.values,
+
+        "Percentage (%)":
+            priority_percentages.values
     })
+
 
     priority_statistics["Percentage (%)"] = (
         priority_statistics["Percentage (%)"]
@@ -296,14 +509,15 @@ if show_dashboard:
     )
 
 
-    # ----------------------------------------------
-    # HIGH PRIORITY WORKLOAD
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Critical + High workload
+    # ------------------------------------------------
 
     urgent_tickets = (
         priority_counts["Critical"]
         + priority_counts["High"]
     )
+
 
     urgent_percentage = (
         urgent_tickets
@@ -312,17 +526,24 @@ if show_dashboard:
     )
 
 
-    st.subheader("⚠️ High-Priority Workload")
+    st.subheader(
+        "⚠️ High-Priority Workload"
+    )
+
 
     col1, col2 = st.columns(2)
 
+
     with col1:
+
         st.metric(
             "Critical + High Tickets",
             f"{urgent_tickets:,}"
         )
 
+
     with col2:
+
         st.metric(
             "Percentage of All Tickets",
             f"{urgent_percentage:.2f}%"
@@ -330,32 +551,38 @@ if show_dashboard:
 
 
 # ==================================================
-# 9. QUERY ROUTER
+# 11. QUERY ROUTER
 # ==================================================
 
 def determine_route(question):
 
     question_lower = question.lower()
 
+
     analytical_words = [
+
         "how many",
         "count",
         "total",
         "most",
         "least",
         "number of"
+
     ]
+
 
     for word in analytical_words:
 
         if word in question_lower:
+
             return "PANDAS"
+
 
     return "RAG"
 
 
 # ==================================================
-# 10. PANDAS ANALYTICAL ENGINE
+# 12. PANDAS ANALYTICAL ENGINE
 # ==================================================
 
 def pandas_answer(question):
@@ -363,16 +590,19 @@ def pandas_answer(question):
     question_lower = question.lower()
 
 
-    # ----------------------------------------------
-    # PRIORITY QUESTIONS
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Priority count
+    # ------------------------------------------------
 
     priorities = [
+
         "critical",
         "high",
         "medium",
         "low"
+
     ]
+
 
     for priority in priorities:
 
@@ -386,6 +616,7 @@ def pandas_answer(question):
                 .sum()
             )
 
+
             return (
                 f"There are **{count:,} "
                 f"{priority.title()} priority tickets** "
@@ -393,17 +624,20 @@ def pandas_answer(question):
             )
 
 
-    # ----------------------------------------------
-    # STATUS QUESTIONS
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Status count
+    # ------------------------------------------------
 
     statuses = [
+
         "open",
         "closed",
         "resolved",
         "new",
         "in progress"
+
     ]
+
 
     for status in statuses:
 
@@ -417,19 +651,21 @@ def pandas_answer(question):
                 .sum()
             )
 
+
             return (
                 f"There are **{count:,} tickets "
                 f"with status {status.title()}**."
             )
 
 
-    # ----------------------------------------------
-    # TOTAL NUMBER OF TICKETS
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Total tickets
+    # ------------------------------------------------
 
     if (
         "total" in question_lower
-        or "how many tickets" in question_lower
+        or
+        "how many tickets" in question_lower
     ):
 
         return (
@@ -438,9 +674,9 @@ def pandas_answer(question):
         )
 
 
-    # ----------------------------------------------
-    # UNSUPPORTED ANALYTICAL QUESTION
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Unsupported analytics
+    # ------------------------------------------------
 
     return (
         "This appears to be an analytical question, "
@@ -450,18 +686,20 @@ def pandas_answer(question):
 
 
 # ==================================================
-# 11. RAG ENGINE
+# 13. RAG ENGINE
 # ==================================================
 
 def rag_answer(question):
 
-    # ----------------------------------------------
-    # Retrieve similar tickets from ChromaDB
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Retrieve five semantically similar tickets
+    # ------------------------------------------------
 
-    results = vectorstore.similarity_search(
-        question,
-        k=5
+    results = (
+        vectorstore.similarity_search(
+            question,
+            k=5
+        )
     )
 
 
@@ -473,25 +711,28 @@ def rag_answer(question):
         )
 
 
-    # ----------------------------------------------
-    # Build context
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # Combine retrieved records
+    # ------------------------------------------------
 
     context = "\n\n".join(
+
         result.page_content
+
         for result in results
+
     )
 
 
-    # ----------------------------------------------
-    # RAG PROMPT
-    # ----------------------------------------------
+    # ------------------------------------------------
+    # RAG prompt
+    # ------------------------------------------------
 
     prompt = f"""
 You are an ITSM support assistant.
 
-Answer the user's question using ONLY the ITSM ticket
-records contained in the context below.
+Answer the user's question using ONLY the ITSM
+ticket records contained in the CONTEXT below.
 
 Rules:
 
@@ -510,8 +751,11 @@ Rules:
    that there is insufficient information.
 
 6. Do not claim that the retrieved records represent
-   the entire ITSM database. They are only records
-   retrieved by the RAG system.
+   the entire ITSM dataset.
+
+7. Remember that RAG retrieves only the most
+   semantically relevant records from the indexed
+   ticket collection.
 
 CONTEXT:
 
@@ -525,39 +769,47 @@ ANSWER:
 """
 
 
-    # ----------------------------------------------
-    # Generate LLM answer
-    # ----------------------------------------------
+    response = llm.invoke(
+        prompt
+    )
 
-    response = llm.invoke(prompt)
 
-    return response.content, results
+    return (
+        response.content,
+        results
+    )
 
 
 # ==================================================
-# 12. ITSM ASSISTANT
+# 14. ITSM ASSISTANT
 # ==================================================
 
 st.divider()
 
-st.subheader("🤖 Ask the ITSM Assistant")
+st.subheader(
+    "🤖 Ask the ITSM Assistant"
+)
+
 
 st.write(
-    "The Query Router automatically decides whether "
-    "to use Pandas data analysis or RAG semantic search."
+    "The Query Router automatically selects either "
+    "Pandas data analysis or RAG semantic search."
 )
 
 
 question = st.text_input(
+
     "Enter your question:",
+
     placeholder=(
-        "Example: How many Critical tickets are there?"
+        "Example: Find tickets related "
+        "to network connectivity problems"
     )
 )
 
 
 # ==================================================
-# 13. PROCESS USER QUESTION
+# 15. PROCESS QUESTION
 # ==================================================
 
 if st.button(
@@ -571,11 +823,8 @@ if st.button(
             "Please enter a question."
         )
 
-    else:
 
-        # ------------------------------------------
-        # Determine route
-        # ------------------------------------------
+    else:
 
         route = determine_route(
             question
@@ -583,7 +832,7 @@ if st.button(
 
 
         # ==========================================
-        # PANDAS ROUTE
+        # PANDAS
         # ==========================================
 
         if route == "PANDAS":
@@ -592,6 +841,7 @@ if st.button(
                 "📊 Route selected: "
                 "Pandas Data Analysis"
             )
+
 
             with st.spinner(
                 "Analysing complete dataset..."
@@ -602,95 +852,140 @@ if st.button(
                 )
 
 
-            st.subheader("💡 Answer")
+            st.subheader(
+                "💡 Answer"
+            )
 
-            st.markdown(answer)
+
+            st.markdown(
+                answer
+            )
+
+
+            st.caption(
+                f"Analysis coverage: "
+                f"{len(df):,} CSV records."
+            )
 
 
         # ==========================================
-        # RAG ROUTE
+        # RAG
         # ==========================================
 
         else:
 
-            st.info(
-                "🔎 Route selected: "
-                "RAG Semantic Search"
-            )
+            if not rag_available:
 
-            with st.spinner(
-                "Searching ChromaDB..."
-            ):
-
-                answer, results = (
-                    rag_answer(question)
+                st.error(
+                    "RAG is currently unavailable. "
+                    "Please check the OpenAI API key "
+                    "and vector database configuration."
                 )
 
 
-            st.subheader("💡 Answer")
+            else:
 
-            st.write(answer)
-
-
-            # --------------------------------------
-            # Retrieved evidence
-            # --------------------------------------
-
-            st.subheader(
-                "📄 Retrieved Evidence"
-            )
-
-            st.caption(
-                "These records were retrieved from "
-                "ChromaDB and supplied to the LLM."
-            )
-
-
-            for i, result in enumerate(
-                results,
-                start=1
-            ):
-
-                ticket_id = (
-                    result.metadata.get(
-                        "ticket_id",
-                        "Unknown"
-                    )
-                )
-
-                priority = (
-                    result.metadata.get(
-                        "priority",
-                        "Unknown"
-                    )
-                )
-
-                topic = (
-                    result.metadata.get(
-                        "topic",
-                        "Unknown"
-                    )
+                st.info(
+                    "🔎 Route selected: "
+                    "RAG Semantic Search"
                 )
 
 
-                title = (
-                    f"Result {i}: "
-                    f"{ticket_id} | "
-                    f"{priority} | "
-                    f"{topic}"
+                with st.spinner(
+                    "Searching ChromaDB..."
+                ):
+
+                    answer, results = (
+                        rag_answer(
+                            question
+                        )
+                    )
+
+
+                st.subheader(
+                    "💡 Answer"
                 )
 
 
-                with st.expander(title):
+                st.write(
+                    answer
+                )
 
-                    st.write(
-                        result.page_content
+
+                st.caption(
+                    f"RAG search coverage: "
+                    f"{rag_ticket_count:,} "
+                    f"indexed tickets."
+                )
+
+
+                # ----------------------------------
+                # Retrieved evidence
+                # ----------------------------------
+
+                st.subheader(
+                    "📄 Retrieved Evidence"
+                )
+
+
+                st.caption(
+                    "These records were retrieved "
+                    "from ChromaDB and supplied "
+                    "to the LLM."
+                )
+
+
+                for i, result in enumerate(
+                    results,
+                    start=1
+                ):
+
+                    ticket_id = (
+                        result.metadata.get(
+                            "ticket_id",
+                            "Unknown"
+                        )
                     )
 
-                    st.write(
-                        "**Metadata**"
+
+                    priority = (
+                        result.metadata.get(
+                            "priority",
+                            "Unknown"
+                        )
                     )
 
-                    st.json(
-                        result.metadata
+
+                    topic = (
+                        result.metadata.get(
+                            "topic",
+                            "Unknown"
+                        )
                     )
+
+
+                    title = (
+                        f"Result {i}: "
+                        f"{ticket_id} | "
+                        f"{priority} | "
+                        f"{topic}"
+                    )
+
+
+                    with st.expander(
+                        title
+                    ):
+
+                        st.write(
+                            result.page_content
+                        )
+
+
+                        st.write(
+                            "**Metadata**"
+                        )
+
+
+                        st.json(
+                            result.metadata
+                        )
